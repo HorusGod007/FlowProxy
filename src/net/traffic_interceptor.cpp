@@ -665,7 +665,7 @@ void TrafficInterceptor::relay_data(Socket& client, Socket& remote, uint64_t con
         FD_SET(remote.handle(), &fds);
 
         struct timeval tv;
-        tv.tv_sec = 10;
+        tv.tv_sec = 120;
         tv.tv_usec = 0;
 
         SOCKET max_fd = std::max(client.handle(), remote.handle()) + 1;

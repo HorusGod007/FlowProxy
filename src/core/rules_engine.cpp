@@ -25,7 +25,7 @@ bool ProxyRule::matches(const std::string& app_name, const std::string& dest_hos
         return match_glob(app_name, pattern);
 
     case RuleTarget::Domain:
-        return match_glob(dest_host, pattern);
+        return match_domain(dest_host, pattern);
 
     case RuleTarget::IP:
         return match_cidr(dest_ip, pattern);
@@ -67,6 +67,35 @@ bool ProxyRule::match_glob(const std::string& text, const std::string& glob_patt
 
     while (pi < lower_pat.size() && lower_pat[pi] == '*') ++pi;
     return pi == lower_pat.size();
+}
+
+bool ProxyRule::match_domain(const std::string& hostname, const std::string& domain_pattern) const {
+    // If pattern contains wildcards, use glob matching directly
+    if (domain_pattern.find('*') != std::string::npos ||
+        domain_pattern.find('?') != std::string::npos) {
+        return match_glob(hostname, domain_pattern);
+    }
+
+    // Plain domain pattern: match exact domain AND all subdomains
+    // e.g. "netflix.com" matches "netflix.com", "www.netflix.com", "api.netflix.com"
+    std::string lower_host = hostname;
+    std::string lower_pat = domain_pattern;
+    for (auto& c : lower_host) c = (char)tolower(c);
+    for (auto& c : lower_pat) c = (char)tolower(c);
+
+    // Exact match
+    if (lower_host == lower_pat) return true;
+
+    // Subdomain match: hostname ends with ".pattern"
+    if (lower_host.size() > lower_pat.size() + 1) {
+        size_t offset = lower_host.size() - lower_pat.size();
+        if (lower_host[offset - 1] == '.' &&
+            lower_host.compare(offset, lower_pat.size(), lower_pat) == 0) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool ProxyRule::match_cidr(const std::string& ip, const std::string& cidr) const {

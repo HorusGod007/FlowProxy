@@ -38,6 +38,7 @@ struct ProxyRule {
 
 private:
     bool match_glob(const std::string& text, const std::string& glob_pattern) const;
+    bool match_domain(const std::string& hostname, const std::string& domain_pattern) const;
     bool match_cidr(const std::string& ip, const std::string& cidr) const;
     bool match_port_range(uint16_t port, const std::string& range) const;
 };

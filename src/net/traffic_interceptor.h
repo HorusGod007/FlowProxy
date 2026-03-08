@@ -117,5 +117,5 @@ private:
 
     // Concurrency limit
     std::atomic<int> active_handlers_{0};
-    static constexpr int MAX_CONCURRENT_HANDLERS = 128;
+    static constexpr int MAX_CONCURRENT_HANDLERS = 512;
 };
