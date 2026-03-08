@@ -189,6 +189,17 @@ FlowProxy/
 - **Process Detection:** `QueryFullProcessImageName` via TCP table
 - **Linked Libraries:** ws2_32, wininet, comctl32, shlwapi, iphlpapi, psapi, comdlg32, dwmapi, uxtheme
 
+## Donate
+
+If FlowProxy is useful to you, consider supporting development:
+
+| Currency | Address |
+|----------|---------|
+| **USDT (TRC20)** | `TWPe2RnNbTLLgn1cfZhHqkzNb46tHxpsCD` |
+| **ETH / ERC-20 Tokens** | `0x1786f09980942725480d4ba67287366e0a90970a` |
+| **BTC** | `1GzK3GrASavA2d7dC7RKEH3aGf1pY1gjHu` |
+| **LTC** | `LeJJjy1PSbUTyNHuLi6QR276sij5C1MT8u` |
+
 ## Contributing
 
 Contributions are welcome! Feel free to open issues or submit pull requests.
