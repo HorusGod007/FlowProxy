@@ -1,6 +1,6 @@
 # FlowProxy
 
-A lightweight, high-performance proxy client and traffic router for Windows. Built entirely in C++ with the Win32 API — zero external dependencies.
+A lightweight Windows proxy client and traffic router. Route application traffic through SOCKS5/HTTP proxies with flexible rules — filter by app, domain, and port. Built in pure C++ with a native Win32 GUI, no external dependencies.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
@@ -8,18 +8,32 @@ A lightweight, high-performance proxy client and traffic router for Windows. Bui
 
 ---
 
+## What is FlowProxy?
+
+FlowProxy is a system-level proxy client for Windows that gives you full control over which traffic goes through a proxy and which connects directly. Think of it as a simple, open-source alternative to Proxifier — without the price tag or bloat.
+
+It sits between your apps and the internet, intercepting HTTP/HTTPS traffic and routing it based on rules you define. You can target specific applications, domains, IP ranges, or ports — or combine all of them in a single rule.
+
+**Use cases:**
+- Route only your browser through a proxy while everything else connects directly
+- Send traffic to specific domains (e.g., `*.netflix.com`) through a particular proxy
+- Block unwanted connections (telemetry, ads) at the network level
+- Chain multiple proxies together for multi-hop routing
+- Check and rotate between multiple proxy servers automatically
+
 ## Features
 
-- **Application-Based Routing** — Create rules to route specific applications (e.g., `firefox.exe`) through proxy servers while other apps connect directly
-- **Multi-Protocol Support** — HTTP, HTTPS, SOCKS4, and SOCKS5 proxy protocols with authentication
+- **Flexible Rule System** — Create rules that match by application name, domain/IP, port, or any combination. Rules use AND logic: a rule with `firefox.exe` + `*.netflix.com` + `443` only matches Firefox HTTPS traffic to Netflix
+- **Multi-Protocol Support** — HTTP, HTTPS, SOCKS4, and SOCKS5 proxies with authentication
 - **Proxy Chains** — Route traffic through multiple proxies in sequence (multi-hop)
-- **Real-Time Connection Monitor** — View all system TCP connections with process names, similar to Proxifier
-- **Traffic Logging** — Full connection logging with CSV export support
-- **Proxy Checker** — Bulk check proxy servers for availability, latency, and anonymity level
+- **Drag & Drop Rule Ordering** — Reorder rules by dragging them with your mouse. Specific rules are always evaluated before catch-all rules
+- **Real-Time Connection Monitor** — See all system TCP connections with process names, remote addresses, and connection state
+- **Traffic Logging** — Full connection log with destination, proxy used, status codes, and CSV export
+- **Proxy Checker** — Bulk-check proxy servers for availability, latency, and anonymity level
 - **Proxy Rotation** — Automatic rotation across multiple proxies (round-robin, random, or least-used)
-- **DNS Leak Prevention** — Remote DNS resolution through SOCKS5 proxies or custom DNS servers
+- **DNS Leak Prevention** — Resolve DNS through SOCKS5 proxies or custom DNS servers to prevent leaks
 - **System Tray** — Minimizes to tray with quick routing toggle
-- **Lightweight** — Single portable executable, no installation required, no runtime dependencies
+- **Portable** — Single executable, no installation, no runtime dependencies
 
 ## Screenshots
 
@@ -27,13 +41,21 @@ A lightweight, high-performance proxy client and traffic router for Windows. Bui
 
 ## How It Works
 
-FlowProxy runs a local interceptor and configures the Windows system proxy to route HTTP/HTTPS traffic through it. The interceptor evaluates your routing rules for each connection:
+FlowProxy runs a local HTTP/SOCKS5 interceptor and sets the Windows system proxy to route all HTTP/HTTPS traffic through it. For each incoming connection, the interceptor:
 
-- **Rule matches** → Traffic is routed through the specified proxy or chain
-- **No rule matches** → Traffic passes through directly (zero overhead for unmatched apps)
-- **Block rule** → Connection is rejected
+1. Identifies the source application by looking up the TCP connection in the system table
+2. Evaluates your routing rules against the app name, destination host, and port
+3. Routes the traffic accordingly:
+   - **Rule matches with proxy** → Traffic goes through the specified proxy or chain
+   - **Rule matches with direct** → Traffic connects directly, bypassing all proxies
+   - **Rule matches with block** → Connection is rejected
+   - **No rule matches** → Traffic passes through directly (no proxy overhead)
 
-Applications using WinINET or WinHTTP (browsers, most desktop apps) are automatically routed. Apps using raw sockets bypass the system proxy and are unaffected.
+FlowProxy's own traffic is always excluded from routing to prevent loops. Localhost and internal connections are filtered from the monitor for a clean view.
+
+**What gets routed:** Any application that uses WinINET or WinHTTP (browsers, most desktop apps, curl, wget, etc.)
+
+**What doesn't get routed:** UWP/Store apps (AppContainer loopback restriction), applications using raw sockets, and non-TCP traffic (UDP, ICMP).
 
 ## Installation
 
@@ -64,9 +86,7 @@ make -j$(nproc)
 
 **Cross-compile from Linux:**
 ```bash
-# Install MinGW-w64 toolchain
 sudo apt install mingw-w64
-
 mkdir build && cd build
 cmake .. -DCMAKE_TOOLCHAIN_FILE=../toolchain-mingw64.cmake
 make -j$(nproc)
@@ -93,32 +113,35 @@ Enter the proxy host, port, type (HTTP/HTTPS/SOCKS4/SOCKS5), and optional creden
 
 **Menu:** Rules → Add Rule
 
-| Field | Description |
-|-------|-------------|
-| **Name** | Display name for the rule |
-| **Target** | What to match: Application, Domain, IP, Port, or All |
-| **Pattern** | Match pattern — supports wildcards (`*`, `?`) |
-| **Action** | Use Proxy, Direct (bypass), Block, or Use Chain |
-| **Proxy** | Specific proxy or auto-rotation |
-| **Priority** | Lower number = higher priority |
+Rules have three optional filter fields. Leave a field empty to match everything. When multiple fields are filled, all must match (AND logic). Within each field, separate multiple entries with newlines — any one matching counts (OR logic).
 
-**Examples:**
+| Field | Description | Examples |
+|-------|-------------|----------|
+| **Applications** | Executable names to match (supports `*` and `?` wildcards) | `firefox.exe`, `chrome.exe` |
+| **Hosts** | Domain names, IPs, or CIDR ranges | `*.netflix.com`, `192.168.0.0/16` |
+| **Ports** | Port numbers, comma-separated or ranges | `80,443`, `1-1024` |
+| **Action** | Use Proxy, Direct (bypass), Block, or Use Chain | — |
 
-| Rule | Target | Pattern | Action |
-|------|--------|---------|--------|
-| Firefox via proxy | Application | `firefox.exe` | Use Proxy |
-| Block telemetry | Domain | `*.telemetry.*` | Block |
-| Direct for local | IP | `192.168.0.0/16` | Direct |
-| Secure browsing | Port | `443` | Use Proxy |
+**Example rules:**
+
+| Rule Name | Applications | Hosts | Ports | Action |
+|-----------|-------------|-------|-------|--------|
+| Browser via proxy | `firefox.exe` | *(empty = all)* | *(empty = all)* | Use Proxy |
+| Netflix direct | *(empty = all)* | `*.netflix.com` | *(empty = all)* | Direct |
+| Block telemetry | *(empty = all)* | `*.telemetry.*` | *(empty = all)* | Block |
+| Secure only | *(empty = all)* | *(empty = all)* | `443` | Use Proxy |
+| Route everything | *(empty = all)* | *(empty = all)* | *(empty = all)* | Use Proxy |
+
+Rules are evaluated top-to-bottom. Drag and drop to reorder. Specific rules (with at least one filter field filled) are always checked before catch-all rules (all fields empty).
 
 ### Tabs
 
 | Tab | Description |
 |-----|-------------|
 | **Proxies** | Manage proxy servers — add, edit, delete, check, import/export |
-| **Rules** | Configure routing rules per application, domain, IP, or port |
+| **Rules** | Configure routing rules with flexible app/host/port matching |
 | **Connections** | Live view of all system TCP connections with process info |
-| **Logs** | Traffic log showing proxied and direct connections |
+| **Logs** | Traffic log showing all routed and direct connections in real time |
 
 ### Keyboard Shortcuts
 
@@ -162,15 +185,9 @@ FlowProxy/
 - **GUI Framework:** Pure Win32 API (no MFC, no ATL, no Qt)
 - **Networking:** Winsock2 (ws2_32)
 - **System Proxy:** WinINET registry + `InternetSetOption` API
-- **Connection Monitoring:** `GetExtendedTcpTable` with `TCP_TABLE_OWNER_PID_ALL`
-- **Process Detection:** `QueryFullProcessImageName` via TCP table PID lookup
+- **Connection Monitoring:** `GetExtendedTcpTable` with PID lookup
+- **Process Detection:** `QueryFullProcessImageName` via TCP table
 - **Linked Libraries:** ws2_32, wininet, comctl32, shlwapi, iphlpapi, psapi, comdlg32, dwmapi, uxtheme
-
-## Limitations
-
-- **UWP/Store apps** cannot connect to loopback addresses due to AppContainer isolation — they won't be routed through FlowProxy
-- **Raw socket applications** that don't use WinINET/WinHTTP will bypass the system proxy
-- **Non-TCP traffic** (UDP, ICMP) is not intercepted
 
 ## Contributing
 
