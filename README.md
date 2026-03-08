@@ -35,9 +35,9 @@ It sits between your apps and the internet, intercepting HTTP/HTTPS traffic and 
 - **System Tray** — Minimizes to tray with quick routing toggle
 - **Portable** — Single executable, no installation, no runtime dependencies
 
-## Screenshots
+## Screenshot
 
-*Coming soon*
+![FlowProxy](screenshots/main.png)
 
 ## How It Works
 
