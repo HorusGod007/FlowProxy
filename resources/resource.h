@@ -23,6 +23,8 @@
 #define IDM_RULES_EDIT          151
 #define IDM_RULES_DELETE        152
 #define IDM_RULES_MANAGE        153
+#define IDM_RULES_UP            154
+#define IDM_RULES_DOWN          155
 
 // Chain menu
 #define IDM_CHAIN_ADD           160
@@ -69,7 +71,9 @@
 #define IDC_LV_PROXIED          405
 
 // Rule dialog extras
-#define IDC_EDIT_RULE_PRIORITY  808
+#define IDC_EDIT_RULE_APPS      810
+#define IDC_EDIT_RULE_HOSTS     811
+#define IDC_EDIT_RULE_PORTS     812
 
 // Dialog IDs
 #define IDD_PROXY_EDIT          500

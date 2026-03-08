@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 #include <mutex>
-#include <regex>
 
 // Action to take when a rule matches
 enum class RuleAction {
@@ -14,29 +13,27 @@ enum class RuleAction {
     UseChain            // Route through a proxy chain
 };
 
-// Match target type
-enum class RuleTarget {
-    Application = 0,    // Match by executable name (e.g. "chrome.exe")
-    Domain,             // Match by destination domain (e.g. "*.google.com")
-    IP,                 // Match by destination IP (e.g. "192.168.1.0/24")
-    Port,               // Match by destination port
-    All                 // Match everything (default/fallback rule)
-};
-
 struct ProxyRule {
     bool enabled = true;
     std::string name;               // Display name
-    RuleTarget target = RuleTarget::Application;
-    std::string pattern;            // Match pattern (exe name, domain glob, IP/CIDR, port range)
+    std::string apps;               // Semicolon-separated exe patterns (empty = any app)
+    std::string hosts;              // Semicolon-separated domain/IP patterns (empty = any host)
+    std::string ports;              // Port ranges e.g. "80,443,1-1024" (empty = any port)
     RuleAction action = RuleAction::UseProxy;
     int proxy_index = -1;           // -1 = use rotation, >=0 = specific proxy
     int chain_index = -1;           // Index into chain list
-    int priority = 100;             // Lower = higher priority
 
+    // All non-empty fields must match (AND). Empty field = match anything.
     bool matches(const std::string& app_name, const std::string& dest_host,
                  const std::string& dest_ip, uint16_t dest_port) const;
 
+    bool is_catch_all() const { return apps.empty() && hosts.empty() && ports.empty(); }
+
 private:
+    bool match_any_app(const std::string& app_name) const;
+    bool match_any_host(const std::string& dest_host, const std::string& dest_ip) const;
+    bool match_any_port(uint16_t dest_port) const;
+
     bool match_glob(const std::string& text, const std::string& glob_pattern) const;
     bool match_domain(const std::string& hostname, const std::string& domain_pattern) const;
     bool match_cidr(const std::string& ip, const std::string& cidr) const;
@@ -56,12 +53,12 @@ public:
     void clear_rules();
 
     size_t rule_count() const;
-    bool has_ip_target_rules() const;
+    bool needs_dns_resolution() const;
     ProxyRule rule_at(size_t index) const;
     std::vector<ProxyRule>& rules() { return rules_; }
     const std::vector<ProxyRule>& rules() const { return rules_; }
 
-    // Evaluate rules for a connection - returns true if a rule matched, copies it to 'result'
+    // Evaluate rules - specific rules checked before catch-all rules
     bool evaluate(const std::string& app_name, const std::string& dest_host,
                   const std::string& dest_ip, uint16_t dest_port,
                   ProxyRule& result) const;

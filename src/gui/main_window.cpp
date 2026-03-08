@@ -183,6 +183,71 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_NOTIFY:
         return on_notify(lParam);
 
+    case WM_MOUSEMOVE:
+        if (dragging_rule_) {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            // Convert to listview coords
+            POINT lv_pt = pt;
+            ClientToScreen(hwnd_, &lv_pt);
+            ScreenToClient(lv_rules_, &lv_pt);
+            // Hit test to find target item
+            LVHITTESTINFO hti = {};
+            hti.pt = lv_pt;
+            int target = ListView_HitTest(lv_rules_, &hti);
+            // Show insert mark
+            LVINSERTMARK im = {}; im.cbSize = sizeof(im);
+            if (target >= 0) {
+                // Determine if above or below midpoint
+                RECT rc; ListView_GetItemRect(lv_rules_, target, &rc, LVIR_BOUNDS);
+                int mid = (rc.top + rc.bottom) / 2;
+                im.iItem = target;
+                im.dwFlags = (lv_pt.y > mid) ? LVIM_AFTER : 0;
+            } else {
+                im.iItem = (int)rules_engine_.rule_count() - 1;
+                im.dwFlags = LVIM_AFTER;
+            }
+            ListView_SetInsertMark(lv_rules_, &im);
+        }
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (dragging_rule_) {
+            dragging_rule_ = false;
+            ReleaseCapture();
+            // Get final drop position
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            POINT lv_pt = pt;
+            ClientToScreen(hwnd_, &lv_pt);
+            ScreenToClient(lv_rules_, &lv_pt);
+            LVHITTESTINFO hti = {};
+            hti.pt = lv_pt;
+            int target = ListView_HitTest(lv_rules_, &hti);
+            // Clear insert mark
+            LVINSERTMARK im = {}; im.cbSize = sizeof(im); im.iItem = -1;
+            ListView_SetInsertMark(lv_rules_, &im);
+            // Move the rule
+            if (target >= 0 && target != drag_rule_index_) {
+                // Determine final position (above or below target)
+                RECT rc; ListView_GetItemRect(lv_rules_, target, &rc, LVIR_BOUNDS);
+                int mid = (rc.top + rc.bottom) / 2;
+                int drop_pos = (lv_pt.y > mid) ? target + 1 : target;
+                if (drop_pos > drag_rule_index_) drop_pos--;
+                // Move step by step
+                int src = drag_rule_index_;
+                if (drop_pos < src) {
+                    for (int i = src; i > drop_pos; --i)
+                        rules_engine_.move_rule_up((size_t)i);
+                } else if (drop_pos > src) {
+                    for (int i = src; i < drop_pos; ++i)
+                        rules_engine_.move_rule_down((size_t)i);
+                }
+                refresh_rules_list();
+                ListView_SetItemState(lv_rules_, drop_pos, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            }
+            drag_rule_index_ = -1;
+        }
+        return 0;
+
     case WM_CONTEXTMENU:
         on_context_menu((HWND)wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         return 0;
@@ -277,6 +342,9 @@ void MainWindow::create_menu() {
     AppendMenuW(rules_menu, MF_STRING, IDM_RULES_ADD, L"Add &Rule...");
     AppendMenuW(rules_menu, MF_STRING, IDM_RULES_EDIT, L"&Edit Rule...");
     AppendMenuW(rules_menu, MF_STRING, IDM_RULES_DELETE, L"&Delete Rule");
+    AppendMenuW(rules_menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(rules_menu, MF_STRING, IDM_RULES_UP, L"Move Rule &Up");
+    AppendMenuW(rules_menu, MF_STRING, IDM_RULES_DOWN, L"Move Rule Do&wn");
     AppendMenuW(rules_menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(rules_menu, MF_STRING, IDM_CHAIN_ADD, L"Add &Chain...");
     AppendMenuW(rules_menu, MF_STRING, IDM_CHAIN_EDIT, L"Edit C&hain...");
@@ -373,7 +441,7 @@ void MainWindow::create_tab_control() {
 static HWND create_lv(HWND parent, HINSTANCE hInst, int id) {
     HWND lv = CreateWindowExW(
         0, WC_LISTVIEWW, L"",
-        WS_CHILD | LVS_REPORT | LVS_SHOWSELALWAYS,
+        WS_CHILD | LVS_REPORT | LVS_SINGLESEL,
         0, 0, 0, 0,
         parent, (HMENU)(INT_PTR)id, hInst, nullptr
     );
@@ -403,8 +471,8 @@ void MainWindow::create_proxy_listview() {
 void MainWindow::create_rules_listview() {
     lv_rules_ = create_lv(hwnd_, hinstance_, IDC_LV_RULES);
     struct { const wchar_t* n; int w; } cols[] = {
-        {L"#",38},{L"Enabled",60},{L"Name",135},{L"Target",90},{L"Pattern",175},
-        {L"Action",85},{L"Proxy/Chain",110},{L"Priority",65}
+        {L"#",32},{L"Name",120},{L"Applications",130},{L"Hosts",170},
+        {L"Ports",65},{L"Action",70},{L"Proxy/Chain",110}
     };
     for (int i = 0; i < _countof(cols); ++i) {
         LVCOLUMNW c = {}; c.mask = LVCF_TEXT|LVCF_WIDTH|LVCF_SUBITEM;
@@ -570,28 +638,27 @@ void MainWindow::refresh_rules_list() {
         item.pszText = (LPWSTR)num.c_str();
         ListView_InsertItem(lv_rules_, &item);
 
-        ListView_SetItemText(lv_rules_,(int)i,1,(LPWSTR)(r.enabled?L"Yes":L"No"));
         std::wstring nm = utf8_to_wide(r.name);
-        ListView_SetItemText(lv_rules_,(int)i,2,(LPWSTR)nm.c_str());
+        ListView_SetItemText(lv_rules_,(int)i,1,(LPWSTR)nm.c_str());
 
-        const wchar_t* targets[] = {L"Application",L"Domain",L"IP",L"Port",L"All"};
-        ListView_SetItemText(lv_rules_,(int)i,3,(LPWSTR)targets[(int)r.target]);
+        std::wstring apps = r.apps.empty() ? L"*" : utf8_to_wide(r.apps);
+        ListView_SetItemText(lv_rules_,(int)i,2,(LPWSTR)apps.c_str());
 
-        std::wstring pat = utf8_to_wide(r.pattern);
-        ListView_SetItemText(lv_rules_,(int)i,4,(LPWSTR)pat.c_str());
+        std::wstring hosts = r.hosts.empty() ? L"*" : utf8_to_wide(r.hosts);
+        ListView_SetItemText(lv_rules_,(int)i,3,(LPWSTR)hosts.c_str());
 
-        const wchar_t* actions[] = {L"Use Proxy",L"Direct",L"Block",L"Use Chain"};
+        std::wstring ports = r.ports.empty() ? L"*" : utf8_to_wide(r.ports);
+        ListView_SetItemText(lv_rules_,(int)i,4,(LPWSTR)ports.c_str());
+
+        const wchar_t* actions[] = {L"Proxy",L"Direct",L"Block",L"Chain"};
         ListView_SetItemText(lv_rules_,(int)i,5,(LPWSTR)actions[(int)r.action]);
 
         std::wstring pc = L"-";
         if (r.action == RuleAction::UseProxy && r.proxy_index >= 0)
-            pc = L"Proxy #" + std::to_wstring(r.proxy_index + 1);
+            pc = L"#" + std::to_wstring(r.proxy_index + 1);
         else if (r.action == RuleAction::UseChain && r.chain_index >= 0)
             pc = L"Chain #" + std::to_wstring(r.chain_index + 1);
         ListView_SetItemText(lv_rules_,(int)i,6,(LPWSTR)pc.c_str());
-
-        std::wstring pri = std::to_wstring(r.priority);
-        ListView_SetItemText(lv_rules_,(int)i,7,(LPWSTR)pri.c_str());
     }
     SendMessage(lv_rules_, WM_SETREDRAW, TRUE, 0);
 }
@@ -779,6 +846,8 @@ void MainWindow::on_command(WPARAM wParam) {
         case IDM_RULES_ADD:         on_rule_add(); break;
         case IDM_RULES_EDIT:        on_rule_edit(); break;
         case IDM_RULES_DELETE:      on_rule_delete(); break;
+        case IDM_RULES_UP:          on_rule_move_up(); break;
+        case IDM_RULES_DOWN:        on_rule_move_down(); break;
         case IDM_CHAIN_ADD:         on_chain_add(); break;
         case IDM_CHAIN_EDIT:        on_chain_edit(); break;
         case IDM_CHAIN_DELETE:      on_chain_delete(); break;
@@ -830,8 +899,22 @@ LRESULT MainWindow::on_notify(LPARAM lParam) {
             break;
         }
         }
-    } else if (nmhdr->hwndFrom == lv_rules_ && nmhdr->code == NM_DBLCLK) {
-        on_rule_edit();
+    } else if (nmhdr->hwndFrom == lv_rules_) {
+        if (nmhdr->code == NM_DBLCLK) {
+            on_rule_edit();
+        } else if (nmhdr->code == LVN_BEGINDRAG) {
+            auto nmlv = (LPNMLISTVIEW)lParam;
+            drag_rule_index_ = nmlv->iItem;
+            dragging_rule_ = true;
+            SetCapture(hwnd_);
+            // Show insert mark at current position
+            LVINSERTMARK im = {}; im.cbSize = sizeof(im);
+            im.iItem = drag_rule_index_;
+            ListView_SetInsertMark(lv_rules_, &im);
+        } else if (nmhdr->code == LVN_KEYDOWN) {
+            auto kd = (LPNMLVKEYDOWN)lParam;
+            if (kd->wVKey == VK_DELETE) on_rule_delete();
+        }
     }
     return 0;
 }
@@ -854,6 +937,9 @@ void MainWindow::on_context_menu(HWND hwnd, int x, int y) {
         AppendMenuW(popup, MF_STRING, IDM_RULES_ADD, L"Add Rule...");
         AppendMenuW(popup, MF_STRING, IDM_RULES_EDIT, L"Edit Rule...");
         AppendMenuW(popup, MF_STRING, IDM_RULES_DELETE, L"Delete Rule");
+        AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(popup, MF_STRING, IDM_RULES_UP, L"Move Up");
+        AppendMenuW(popup, MF_STRING, IDM_RULES_DOWN, L"Move Down");
         TrackPopupMenu(popup, TPM_RIGHTBUTTON, x, y, 0, hwnd_, nullptr);
         DestroyMenu(popup);
     }
@@ -1034,6 +1120,26 @@ void MainWindow::on_rule_delete() {
         rules_engine_.remove_rule(indices[0]);
         refresh_rules_list();
     }
+}
+
+void MainWindow::on_rule_move_up() {
+    auto indices = get_selected_indices(lv_rules_);
+    if (indices.empty() || indices[0] == 0) return;
+    size_t idx = indices[0];
+    rules_engine_.move_rule_up(idx);
+    refresh_rules_list();
+    // Re-select the moved item
+    ListView_SetItemState(lv_rules_, (int)(idx - 1), LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+}
+
+void MainWindow::on_rule_move_down() {
+    auto indices = get_selected_indices(lv_rules_);
+    if (indices.empty() || indices[0] + 1 >= rules_engine_.rule_count()) return;
+    size_t idx = indices[0];
+    rules_engine_.move_rule_down(idx);
+    refresh_rules_list();
+    // Re-select the moved item
+    ListView_SetItemState(lv_rules_, (int)(idx + 1), LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 }
 
 // ============================================================================

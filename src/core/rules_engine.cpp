@@ -20,28 +20,49 @@ bool ProxyRule::matches(const std::string& app_name, const std::string& dest_hos
                         const std::string& dest_ip, uint16_t dest_port) const {
     if (!enabled) return false;
 
-    switch (target) {
-    case RuleTarget::Application:
-        return match_glob(app_name, pattern);
+    // All non-empty fields must match (AND logic). Empty = match any.
+    if (!apps.empty() && !match_any_app(app_name)) return false;
+    if (!hosts.empty() && !match_any_host(dest_host, dest_ip)) return false;
+    if (!ports.empty() && !match_any_port(dest_port)) return false;
 
-    case RuleTarget::Domain:
-        return match_domain(dest_host, pattern);
+    return true;
+}
 
-    case RuleTarget::IP:
-        return match_cidr(dest_ip, pattern);
-
-    case RuleTarget::Port:
-        return match_port_range(dest_port, pattern);
-
-    case RuleTarget::All:
-        return true;
+bool ProxyRule::match_any_app(const std::string& app_name) const {
+    std::istringstream iss(apps);
+    std::string sub;
+    while (std::getline(iss, sub, ';')) {
+        while (!sub.empty() && sub[0] == ' ') sub.erase(0, 1);
+        while (!sub.empty() && sub.back() == ' ') sub.pop_back();
+        if (sub.empty()) continue;
+        if (match_glob(app_name, sub)) return true;
     }
-
     return false;
 }
 
+bool ProxyRule::match_any_host(const std::string& dest_host, const std::string& dest_ip) const {
+    std::istringstream iss(hosts);
+    std::string sub;
+    while (std::getline(iss, sub, ';')) {
+        while (!sub.empty() && sub[0] == ' ') sub.erase(0, 1);
+        while (!sub.empty() && sub.back() == ' ') sub.pop_back();
+        if (sub.empty()) continue;
+
+        // Try CIDR matching if pattern has '/' and we have a resolved IP
+        if (sub.find('/') != std::string::npos && !dest_ip.empty()) {
+            if (match_cidr(dest_ip, sub)) return true;
+        }
+        // Try domain/hostname matching
+        if (match_domain(dest_host, sub)) return true;
+    }
+    return false;
+}
+
+bool ProxyRule::match_any_port(uint16_t dest_port) const {
+    return match_port_range(dest_port, ports);
+}
+
 bool ProxyRule::match_glob(const std::string& text, const std::string& glob_pattern) const {
-    // Simple glob matching supporting * and ?
     std::string lower_text = text;
     std::string lower_pat = glob_pattern;
     for (auto& c : lower_text) c = (char)tolower(c);
@@ -70,14 +91,11 @@ bool ProxyRule::match_glob(const std::string& text, const std::string& glob_patt
 }
 
 bool ProxyRule::match_domain(const std::string& hostname, const std::string& domain_pattern) const {
-    // If pattern contains wildcards, use glob matching directly
     if (domain_pattern.find('*') != std::string::npos ||
         domain_pattern.find('?') != std::string::npos) {
         return match_glob(hostname, domain_pattern);
     }
 
-    // Plain domain pattern: match exact domain AND all subdomains
-    // e.g. "netflix.com" matches "netflix.com", "www.netflix.com", "api.netflix.com"
     std::string lower_host = hostname;
     std::string lower_pat = domain_pattern;
     for (auto& c : lower_host) c = (char)tolower(c);
@@ -99,7 +117,6 @@ bool ProxyRule::match_domain(const std::string& hostname, const std::string& dom
 }
 
 bool ProxyRule::match_cidr(const std::string& ip, const std::string& cidr) const {
-    // Parse CIDR notation: "192.168.1.0/24" or plain IP "192.168.1.1"
     std::string net_str = cidr;
     int prefix_len = 32;
 
@@ -120,26 +137,31 @@ bool ProxyRule::match_cidr(const std::string& ip, const std::string& cidr) const
 }
 
 bool ProxyRule::match_port_range(uint16_t port, const std::string& range) const {
-    // Support: "80", "80-443", "80,443,8080", "1-1024"
     std::istringstream iss(range);
     std::string token;
 
     while (std::getline(iss, token, ',')) {
-        // Trim
         while (!token.empty() && token[0] == ' ') token.erase(0, 1);
         while (!token.empty() && token.back() == ' ') token.pop_back();
+        // Also split by semicolons for consistency
+        std::istringstream iss2(token);
+        std::string sub;
+        while (std::getline(iss2, sub, ';')) {
+            while (!sub.empty() && sub[0] == ' ') sub.erase(0, 1);
+            while (!sub.empty() && sub.back() == ' ') sub.pop_back();
 
-        auto dash = token.find('-');
-        if (dash != std::string::npos) {
-            try {
-                uint16_t low = (uint16_t)std::stoi(token.substr(0, dash));
-                uint16_t high = (uint16_t)std::stoi(token.substr(dash + 1));
-                if (port >= low && port <= high) return true;
-            } catch (...) {}
-        } else {
-            try {
-                if (port == (uint16_t)std::stoi(token)) return true;
-            } catch (...) {}
+            auto dash = sub.find('-');
+            if (dash != std::string::npos) {
+                try {
+                    uint16_t low = (uint16_t)std::stoi(sub.substr(0, dash));
+                    uint16_t high = (uint16_t)std::stoi(sub.substr(dash + 1));
+                    if (port >= low && port <= high) return true;
+                } catch (...) {}
+            } else {
+                try {
+                    if (port == (uint16_t)std::stoi(sub)) return true;
+                } catch (...) {}
+            }
         }
     }
 
@@ -153,9 +175,6 @@ bool ProxyRule::match_port_range(uint16_t port, const std::string& range) const 
 void RulesEngine::add_rule(const ProxyRule& rule) {
     std::lock_guard<std::mutex> lock(mutex_);
     rules_.push_back(rule);
-    // Sort by priority
-    std::stable_sort(rules_.begin(), rules_.end(),
-        [](const ProxyRule& a, const ProxyRule& b) { return a.priority < b.priority; });
 }
 
 void RulesEngine::update_rule(size_t index, const ProxyRule& rule) {
@@ -196,10 +215,10 @@ size_t RulesEngine::rule_count() const {
     return rules_.size();
 }
 
-bool RulesEngine::has_ip_target_rules() const {
+bool RulesEngine::needs_dns_resolution() const {
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& r : rules_)
-        if (r.enabled && r.target == RuleTarget::IP) return true;
+        if (r.enabled && r.hosts.find('/') != std::string::npos) return true;
     return false;
 }
 
@@ -213,14 +232,25 @@ bool RulesEngine::evaluate(const std::string& app_name, const std::string& dest_
                             ProxyRule& result) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // First pass: specific rules (at least one field filled)
     for (const auto& rule : rules_) {
+        if (rule.is_catch_all()) continue;
         if (rule.matches(app_name, dest_host, dest_ip, dest_port)) {
-            result = rule; // Copy out while still holding lock
+            result = rule;
             return true;
         }
     }
 
-    return false; // No matching rule
+    // Second pass: catch-all rules (all fields empty)
+    for (const auto& rule : rules_) {
+        if (!rule.is_catch_all()) continue;
+        if (rule.matches(app_name, dest_host, dest_ip, dest_port)) {
+            result = rule;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool RulesEngine::save_to_file(const std::string& filepath) const {
@@ -231,12 +261,12 @@ bool RulesEngine::save_to_file(const std::string& filepath) const {
     for (const auto& rule : rules_) {
         file << (rule.enabled ? "1" : "0") << "|"
              << rule.name << "|"
-             << (int)rule.target << "|"
-             << rule.pattern << "|"
+             << rule.apps << "|"
+             << rule.hosts << "|"
+             << rule.ports << "|"
              << (int)rule.action << "|"
              << rule.proxy_index << "|"
-             << rule.chain_index << "|"
-             << rule.priority << "\n";
+             << rule.chain_index << "\n";
     }
 
     return true;
@@ -261,11 +291,9 @@ bool RulesEngine::load_from_file(const std::string& filepath) {
         rule.enabled = (token == "1");
 
         if (!std::getline(iss, rule.name, '|')) continue;
-
-        if (!std::getline(iss, token, '|')) continue;
-        rule.target = (RuleTarget)std::stoi(token);
-
-        if (!std::getline(iss, rule.pattern, '|')) continue;
+        if (!std::getline(iss, rule.apps, '|')) continue;
+        if (!std::getline(iss, rule.hosts, '|')) continue;
+        if (!std::getline(iss, rule.ports, '|')) continue;
 
         if (!std::getline(iss, token, '|')) continue;
         rule.action = (RuleAction)std::stoi(token);
@@ -275,9 +303,6 @@ bool RulesEngine::load_from_file(const std::string& filepath) {
 
         if (!std::getline(iss, token, '|')) continue;
         rule.chain_index = std::stoi(token);
-
-        if (!std::getline(iss, token, '|')) continue;
-        rule.priority = std::stoi(token);
 
         rules_.push_back(rule);
     }

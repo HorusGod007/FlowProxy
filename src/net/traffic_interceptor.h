@@ -83,8 +83,9 @@ private:
                               const std::string& dest_host, uint16_t dest_port);
     bool connect_direct(Socket& remote, const std::string& host, uint16_t port);
 
-    // Bidirectional data relay with monitoring
+    // Bidirectional data relay
     void relay_data(Socket& client, Socket& remote, uint64_t conn_id);
+    void relay_data_simple(Socket& client, Socket& remote);
 
     // Request parsing
     bool parse_request(const std::string& request, std::string& method,

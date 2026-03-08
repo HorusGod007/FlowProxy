@@ -293,6 +293,60 @@ struct RuleData {
     bool confirmed;
 };
 
+// Convert stored semicolons to newlines for multiline display
+static std::wstring semis_to_lines(const std::string& s) {
+    std::wstring wide = utf8_to_wide(s);
+    std::wstring result, token;
+    for (auto c : wide) {
+        if (c == L';') {
+            while (!token.empty() && token[0] == L' ') token.erase(0, 1);
+            while (!token.empty() && token.back() == L' ') token.pop_back();
+            if (!token.empty()) {
+                if (!result.empty()) result += L"\r\n";
+                result += token;
+            }
+            token.clear();
+        } else {
+            token += c;
+        }
+    }
+    while (!token.empty() && token[0] == L' ') token.erase(0, 1);
+    while (!token.empty() && token.back() == L' ') token.pop_back();
+    if (!token.empty()) {
+        if (!result.empty()) result += L"\r\n";
+        result += token;
+    }
+    return result;
+}
+
+// Convert newlines/semicolons back to semicolons for storage
+static std::string lines_to_semis(const wchar_t* text) {
+    std::wstring wide(text);
+    std::string result;
+    std::wstring token;
+    for (auto c : wide) {
+        if (c == L'\r') continue;
+        if (c == L'\n' || c == L';') {
+            while (!token.empty() && token[0] == L' ') token.erase(0, 1);
+            while (!token.empty() && token.back() == L' ') token.pop_back();
+            if (!token.empty()) {
+                if (!result.empty()) result += "; ";
+                result += wide_to_utf8(token);
+            }
+            token.clear();
+        } else {
+            token += c;
+        }
+    }
+    while (!token.empty() && token[0] == L' ') token.erase(0, 1);
+    while (!token.empty() && token.back() == L' ') token.pop_back();
+    if (!token.empty()) {
+        if (!result.empty()) result += "; ";
+        result += wide_to_utf8(token);
+    }
+    return result;
+}
+
 static INT_PTR CALLBACK rule_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     auto* d = (RuleData*)GetWindowLongPtr(h, GWLP_USERDATA);
 
@@ -302,21 +356,17 @@ static INT_PTR CALLBACK rule_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowLongPtr(h, GWLP_USERDATA, (LONG_PTR)d);
 
         SetDlgItemTextW(h, IDC_EDIT_RULE_NAME, utf8_to_wide(d->rule->name).c_str());
-        SetDlgItemTextW(h, IDC_EDIT_RULE_PATTERN, utf8_to_wide(d->rule->pattern).c_str());
-
-        HWND target_cb = GetDlgItem(h, IDC_COMBO_RULE_TARGET);
-        const wchar_t* targets[] = {L"Application (exe name)",L"Domain (*.example.com)",
-                                    L"IP Address (CIDR)",L"Port (80,443,1-1024)",L"All Traffic"};
-        for (auto t : targets) SendMessageW(target_cb, CB_ADDSTRING, 0, (LPARAM)t);
-        SendMessageW(target_cb, CB_SETCURSEL, (int)d->rule->target, 0);
+        SetDlgItemTextW(h, IDC_EDIT_RULE_APPS, semis_to_lines(d->rule->apps).c_str());
+        SetDlgItemTextW(h, IDC_EDIT_RULE_HOSTS, semis_to_lines(d->rule->hosts).c_str());
+        SetDlgItemTextW(h, IDC_EDIT_RULE_PORTS, utf8_to_wide(d->rule->ports).c_str());
 
         HWND action_cb = GetDlgItem(h, IDC_COMBO_RULE_ACTION);
-        const wchar_t* actions[] = {L"Use Proxy",L"Direct (bypass)",L"Block",L"Use Chain"};
+        const wchar_t* actions[] = {L"Use Proxy",L"Direct (bypass proxy)",L"Block",L"Use Chain"};
         for (auto a : actions) SendMessageW(action_cb, CB_ADDSTRING, 0, (LPARAM)a);
         SendMessageW(action_cb, CB_SETCURSEL, (int)d->rule->action, 0);
 
         HWND proxy_cb = GetDlgItem(h, IDC_COMBO_RULE_PROXY);
-        SendMessageW(proxy_cb, CB_ADDSTRING, 0, (LPARAM)L"(Rotation - auto)");
+        SendMessageW(proxy_cb, CB_ADDSTRING, 0, (LPARAM)L"(Auto-rotate)");
         for (size_t i = 0; i < d->proxies->size(); ++i) {
             std::wstring label = std::to_wstring(i+1) + L": " +
                 utf8_to_wide(d->proxies->proxies()[i].address());
@@ -332,32 +382,42 @@ static INT_PTR CALLBACK rule_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         SendMessageW(chain_cb, CB_SETCURSEL, d->rule->chain_index + 1, 0);
 
-        SetDlgItemTextW(h, IDC_EDIT_RULE_PRIORITY, std::to_wstring(d->rule->priority).c_str());
-
         // Placeholder text
-        SendDlgItemMessageW(h, IDC_EDIT_RULE_NAME, EM_SETCUEBANNER, TRUE, (LPARAM)L"e.g. Block ads");
-        SendDlgItemMessageW(h, IDC_EDIT_RULE_PATTERN, EM_SETCUEBANNER, TRUE, (LPARAM)L"e.g. chrome.exe or *.google.com");
+        SendDlgItemMessageW(h, IDC_EDIT_RULE_NAME, EM_SETCUEBANNER, TRUE, (LPARAM)L"e.g. Stream sites");
+        SendDlgItemMessageW(h, IDC_EDIT_RULE_PORTS, EM_SETCUEBANNER, TRUE, (LPARAM)L"e.g. 80, 443 or 1-1024");
 
         // Tooltips
         HWND tip = create_tooltip(h);
-        add_tooltip(tip, h, GetDlgItem(h, IDC_EDIT_RULE_NAME), L"Friendly name for this rule (shown in rules list)");
-        add_tooltip(tip, h, target_cb,
-            L"Application: match by .exe name (e.g. chrome.exe)\n"
-            L"Domain: match by hostname (e.g. *.google.com)\n"
-            L"IP Address: match by CIDR (e.g. 10.0.0.0/8)\n"
-            L"Port: match by port (e.g. 80,443 or 1-1024)\n"
-            L"All Traffic: matches everything (catch-all)");
-        add_tooltip(tip, h, GetDlgItem(h, IDC_EDIT_RULE_PATTERN),
-            L"Wildcards: * matches anything, ? matches one char\n"
-            L"Examples: chrome.exe, *.google.com, 192.168.0.0/16, 80,443");
+        add_tooltip(tip, h, GetDlgItem(h, IDC_EDIT_RULE_NAME),
+            L"A friendly name for this rule.");
+        add_tooltip(tip, h, GetDlgItem(h, IDC_EDIT_RULE_APPS),
+            L"One exe name per line. Wildcards: * and ?\n"
+            L"Leave empty to match all applications.\n\n"
+            L"Examples:\n"
+            L"  chrome.exe\n"
+            L"  firefox.exe\n"
+            L"  *torrent*");
+        add_tooltip(tip, h, GetDlgItem(h, IDC_EDIT_RULE_HOSTS),
+            L"One domain or IP per line. Wildcards: * and ?\n"
+            L"Domains auto-match subdomains.\n"
+            L"Leave empty to match all hosts.\n\n"
+            L"Examples:\n"
+            L"  netflix.com\n"
+            L"  *.google.com\n"
+            L"  192.168.0.0/16");
+        add_tooltip(tip, h, GetDlgItem(h, IDC_EDIT_RULE_PORTS),
+            L"Comma-separated ports or ranges.\n"
+            L"Leave empty to match all ports.\n\n"
+            L"Examples: 80, 443   or   1-1024");
         add_tooltip(tip, h, action_cb,
-            L"Use Proxy: route through selected proxy\n"
-            L"Direct: bypass proxy, connect directly\n"
+            L"Use Proxy: route through proxy\n"
+            L"Direct: connect without proxy\n"
             L"Block: drop the connection\n"
-            L"Use Chain: route through multi-hop proxy chain");
-        add_tooltip(tip, h, proxy_cb, L"Select a specific proxy or use auto-rotation among alive proxies");
-        add_tooltip(tip, h, chain_cb, L"Select a proxy chain for multi-hop routing (only for 'Use Chain' action)");
-        add_tooltip(tip, h, GetDlgItem(h, IDC_EDIT_RULE_PRIORITY), L"Lower number = higher priority. Rules are evaluated in priority order, first match wins.");
+            L"Use Chain: multi-hop proxy chain");
+        add_tooltip(tip, h, proxy_cb,
+            L"Pick a specific proxy or auto-rotate.");
+        add_tooltip(tip, h, chain_cb,
+            L"Only used when Action is 'Use Chain'.");
 
         RECT rc,prc; GetWindowRect(h,&rc); GetWindowRect(GetParent(h),&prc);
         SetWindowPos(h,0,prc.left+(prc.right-prc.left-(rc.right-rc.left))/2,
@@ -368,15 +428,24 @@ static INT_PTR CALLBACK rule_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(wp)==IDOK) {
             wchar_t b[256];
             GetDlgItemTextW(h,IDC_EDIT_RULE_NAME,b,256); d->rule->name = wide_to_utf8(b);
-            GetDlgItemTextW(h,IDC_EDIT_RULE_PATTERN,b,256); d->rule->pattern = wide_to_utf8(b);
-            d->rule->target = (RuleTarget)SendDlgItemMessageW(h,IDC_COMBO_RULE_TARGET,CB_GETCURSEL,0,0);
+            // Read multiline fields, convert newlines to semicolons
+            wchar_t buf[2048] = {};
+            GetDlgItemTextW(h,IDC_EDIT_RULE_APPS,buf,2048); d->rule->apps = lines_to_semis(buf);
+            GetDlgItemTextW(h,IDC_EDIT_RULE_HOSTS,buf,2048); d->rule->hosts = lines_to_semis(buf);
+            GetDlgItemTextW(h,IDC_EDIT_RULE_PORTS,b,256); d->rule->ports = wide_to_utf8(b);
+            // Trim ports
+            while (!d->rule->ports.empty() && d->rule->ports[0] == ' ') d->rule->ports.erase(0,1);
+            while (!d->rule->ports.empty() && d->rule->ports.back() == ' ') d->rule->ports.pop_back();
+
             d->rule->action = (RuleAction)SendDlgItemMessageW(h,IDC_COMBO_RULE_ACTION,CB_GETCURSEL,0,0);
             d->rule->proxy_index = (int)SendDlgItemMessageW(h,IDC_COMBO_RULE_PROXY,CB_GETCURSEL,0,0) - 1;
             d->rule->chain_index = (int)SendDlgItemMessageW(h,IDC_COMBO_RULE_CHAIN,CB_GETCURSEL,0,0) - 1;
-            GetDlgItemTextW(h,IDC_EDIT_RULE_PRIORITY,b,256);
-            try { d->rule->priority = std::stoi(wide_to_utf8(b)); } catch(...) { d->rule->priority = 0; }
             d->rule->enabled = true;
-            if (d->rule->name.empty()) d->rule->name = d->rule->pattern;
+            if (d->rule->name.empty()) {
+                if (!d->rule->hosts.empty()) d->rule->name = d->rule->hosts;
+                else if (!d->rule->apps.empty()) d->rule->name = d->rule->apps;
+                else d->rule->name = "All Traffic";
+            }
             d->confirmed = true; EndDialog(h,IDOK); return TRUE;
         }
         if (LOWORD(wp)==IDCANCEL) { EndDialog(h,IDCANCEL); return TRUE; }
@@ -388,35 +457,42 @@ static INT_PTR CALLBACK rule_dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 bool show_rule_dialog(HWND parent, ProxyRule& rule, const ProxyList& proxies,
                       const ProxyChainManager& chains, bool edit_mode) {
     RuleData data{&rule, &proxies, &chains, edit_mode, false};
-    DlgBuilder b(300, 260, edit_mode ? L"Edit Rule" : L"Add Rule");
+    DlgBuilder b(330, 370, edit_mode ? L"Edit Rule" : L"Add Rule");
 
-    b.add(SS_LEFT,12,12,55,9,0xFFFF,L"Static",L"Name:");
-    b.add(WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,75,10,215,14,IDC_EDIT_RULE_NAME,L"Edit",L"");
+    b.add(SS_LEFT,12,14,60,9,0xFFFF,L"Static",L"Name:");
+    b.add(WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,80,12,240,14,IDC_EDIT_RULE_NAME,L"Edit",L"");
 
-    b.add(SS_LEFT,12,32,55,9,0xFFFF,L"Static",L"Target:");
-    b.add(CBS_DROPDOWNLIST|WS_TABSTOP,75,30,215,100,IDC_COMBO_RULE_TARGET,L"ComboBox",L"");
+    b.add(SS_LEFT,12,36,65,9,0xFFFF,L"Static",L"Applications:");
+    b.add(WS_BORDER|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN,
+          80,34,240,36,IDC_EDIT_RULE_APPS,L"Edit",L"");
+    b.add(SS_LEFT,80,72,240,9,0xFFFF,L"Static",
+          L"One exe per line. Empty = all apps.");
 
-    b.add(SS_LEFT,12,52,55,9,0xFFFF,L"Static",L"Pattern:");
-    b.add(WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,75,50,215,14,IDC_EDIT_RULE_PATTERN,L"Edit",L"");
+    b.add(SS_LEFT,12,88,65,9,0xFFFF,L"Static",L"Hosts:");
+    b.add(WS_BORDER|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN,
+          80,86,240,50,IDC_EDIT_RULE_HOSTS,L"Edit",L"");
+    b.add(SS_LEFT,80,138,240,9,0xFFFF,L"Static",
+          L"One domain/IP per line. Empty = all hosts.");
 
-    b.add(SS_LEFT,12,72,55,9,0xFFFF,L"Static",L"Action:");
-    b.add(CBS_DROPDOWNLIST|WS_TABSTOP,75,70,215,100,IDC_COMBO_RULE_ACTION,L"ComboBox",L"");
+    b.add(SS_LEFT,12,154,65,9,0xFFFF,L"Static",L"Ports:");
+    b.add(WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,80,152,240,14,IDC_EDIT_RULE_PORTS,L"Edit",L"");
+    b.add(SS_LEFT,80,168,240,9,0xFFFF,L"Static",
+          L"e.g. 80, 443 or 1-1024. Empty = all ports.");
 
-    b.add(SS_LEFT,12,92,55,9,0xFFFF,L"Static",L"Proxy:");
-    b.add(CBS_DROPDOWNLIST|WS_TABSTOP,75,90,215,200,IDC_COMBO_RULE_PROXY,L"ComboBox",L"");
+    b.add(SS_LEFT,12,188,60,9,0xFFFF,L"Static",L"Action:");
+    b.add(CBS_DROPDOWNLIST|WS_TABSTOP,80,186,240,100,IDC_COMBO_RULE_ACTION,L"ComboBox",L"");
 
-    b.add(SS_LEFT,12,112,55,9,0xFFFF,L"Static",L"Chain:");
-    b.add(CBS_DROPDOWNLIST|WS_TABSTOP,75,110,215,200,IDC_COMBO_RULE_CHAIN,L"ComboBox",L"");
+    b.add(SS_LEFT,12,210,60,9,0xFFFF,L"Static",L"Proxy:");
+    b.add(CBS_DROPDOWNLIST|WS_TABSTOP,80,208,240,200,IDC_COMBO_RULE_PROXY,L"ComboBox",L"");
 
-    b.add(SS_LEFT,12,132,55,9,0xFFFF,L"Static",L"Priority:");
-    b.add(WS_BORDER|WS_TABSTOP|ES_NUMBER,75,130,45,14,IDC_EDIT_RULE_PRIORITY,L"Edit",L"0");
-    b.add(SS_LEFT,125,132,165,9,0xFFFF,L"Static",L"(lower = evaluated first)");
+    b.add(SS_LEFT,12,232,60,9,0xFFFF,L"Static",L"Chain:");
+    b.add(CBS_DROPDOWNLIST|WS_TABSTOP,80,230,240,200,IDC_COMBO_RULE_CHAIN,L"ComboBox",L"");
 
-    b.add(SS_LEFT,12,155,280,18,0xFFFF,L"Static",
-          L"Hover over any field for help. Rules are evaluated in priority order; first match wins.");
+    b.add(SS_LEFT,12,255,310,18,0xFFFF,L"Static",
+          L"All filled fields must match (AND). Empty = match any. Drag to reorder.");
 
-    b.add(BS_DEFPUSHBUTTON|WS_TABSTOP,100,190,55,16,IDOK,L"Button",L"Save");
-    b.add(BS_PUSHBUTTON|WS_TABSTOP,165,190,55,16,IDCANCEL,L"Button",L"Cancel");
+    b.add(BS_DEFPUSHBUTTON|WS_TABSTOP,115,280,65,18,IDOK,L"Button",L"Save");
+    b.add(BS_PUSHBUTTON|WS_TABSTOP,190,280,65,18,IDCANCEL,L"Button",L"Cancel");
 
     DialogBoxIndirectParamW(GetModuleHandle(0), b.finish(), parent, rule_dlg_proc, (LPARAM)&data);
     return data.confirmed;

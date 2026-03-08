@@ -281,9 +281,17 @@ std::vector<SystemTcpConnection> ConnectionMonitor::get_system_connections(
 
     // Cache for process names to avoid repeated lookups
     std::unordered_map<DWORD, std::string> name_cache;
+    DWORD self_pid = GetCurrentProcessId();
 
     for (DWORD i = 0; i < table->dwNumEntries; ++i) {
         auto& row = table->table[i];
+
+        // Skip our own process
+        if (row.dwOwningPid == self_pid) continue;
+
+        // Skip localhost connections (127.0.0.1 <-> 127.0.0.1)
+        DWORD loopback = htonl(INADDR_LOOPBACK);
+        if (row.dwLocalAddr == loopback || row.dwRemoteAddr == loopback) continue;
 
         // Skip LISTEN, TIME_WAIT, CLOSED for cleaner view
         if (row.dwState == MIB_TCP_STATE_LISTEN ||

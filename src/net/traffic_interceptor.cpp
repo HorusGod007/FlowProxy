@@ -191,6 +191,37 @@ void TrafficInterceptor::handle_http_client(Socket client, std::string client_ad
 
     std::string app_name = get_process_name(client_addr, http_port_);
 
+    // Skip monitoring for our own traffic (proxy checker, etc.)
+    if (is_self_process(app_name)) {
+        Socket remote;
+        if (method == "CONNECT") {
+            if (connect_direct(remote, host, port)) {
+                client.send_all("HTTP/1.1 200 Connection Established\r\n\r\n");
+                relay_data_simple(client, remote);
+            } else {
+                client.send_all("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+            }
+        } else {
+            if (connect_direct(remote, host, port)) {
+                std::string path_rel = "/";
+                auto proto = request.find("://");
+                if (proto != std::string::npos) {
+                    auto working = request.substr(proto + 3);
+                    auto slash = working.find('/');
+                    if (slash != std::string::npos) {
+                        auto space = working.find(' ', slash);
+                        path_rel = working.substr(slash, space != std::string::npos ? space - slash : std::string::npos);
+                    }
+                }
+                remote.send_all(make_relative_request(request, path_rel));
+                relay_data_simple(client, remote);
+            } else {
+                client.send_all("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+            }
+        }
+        return;
+    }
+
     // Register connection with monitor
     LiveConnection conn;
     conn.app_name = app_name;
@@ -265,6 +296,19 @@ void TrafficInterceptor::handle_socks5_client(Socket client, std::string client_
 
     std::string app_name = get_process_name(client_addr, socks_port_);
 
+    // Skip monitoring for our own traffic
+    if (is_self_process(app_name)) {
+        Socket remote;
+        if (connect_direct(remote, dest_host, dest_port)) {
+            char success[10] = { 0x05, 0x00, 0x00, 0x01, 0x7F,0x00,0x00,0x01, 0x00,0x00 };
+            success[8] = (char)((dest_port >> 8) & 0xFF);
+            success[9] = (char)(dest_port & 0xFF);
+            client.send_raw(success, 10);
+            relay_data_simple(client, remote);
+        }
+        return;
+    }
+
     LiveConnection conn;
     conn.app_name = app_name;
     conn.src_addr = client_addr;
@@ -273,27 +317,12 @@ void TrafficInterceptor::handle_socks5_client(Socket client, std::string client_
     conn.status = "Connecting";
     uint64_t conn_id = monitor_.add_connection(conn);
 
-    // Always bypass our own process to prevent loops
-    if (is_self_process(app_name)) {
-        Socket remote;
-        if (connect_direct(remote, dest_host, dest_port)) {
-            char success[10] = { 0x05, 0x00, 0x00, 0x01, 0x7F,0x00,0x00,0x01, 0x00,0x00 };
-            success[8] = (char)((dest_port >> 8) & 0xFF);
-            success[9] = (char)(dest_port & 0xFF);
-            client.send_raw(success, 10);
-            monitor_.update_proxy_used(conn_id, "DIRECT (self-bypass)");
-            relay_data(client, remote, conn_id);
-        }
-        monitor_.close_connection(conn_id);
-        return;
-    }
-
-    // Evaluate rules — only resolve DNS if there are IP-target rules
+    // Evaluate rules — only resolve DNS if needed
     ProxyRule matched_rule;
     const ProxyRule* rule = nullptr;
     if (rules_.rule_count() > 0) {
         std::string dest_ip;
-        if (rules_.has_ip_target_rules())
+        if (rules_.needs_dns_resolution())
             dest_ip = dns_.resolve_local(dest_host);
         if (rules_.evaluate(app_name, dest_host, dest_ip, dest_port, matched_rule))
             rule = &matched_rule;
@@ -341,26 +370,12 @@ void TrafficInterceptor::handle_socks5_client(Socket client, std::string client_
 
 void TrafficInterceptor::handle_connect(Socket& client, const std::string& host, uint16_t port,
                                          const std::string& app_name, uint64_t conn_id) {
-    // Always bypass our own process to prevent loops
-    if (is_self_process(app_name)) {
-        Socket remote;
-        if (connect_direct(remote, host, port)) {
-            client.send_all("HTTP/1.1 200 Connection Established\r\n\r\n");
-            monitor_.update_proxy_used(conn_id, "DIRECT (self)");
-            monitor_.update_connection(conn_id, 0, 0, "Relaying");
-            relay_data(client, remote, conn_id);
-        } else {
-            client.send_all("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-        }
-        return;
-    }
-
-    // Evaluate rules — only resolve DNS if there are IP-target rules
+    // Evaluate rules — only resolve DNS if needed
     ProxyRule matched_rule;
     const ProxyRule* rule = nullptr;
     if (rules_.rule_count() > 0) {
         std::string dest_ip;
-        if (rules_.has_ip_target_rules())
+        if (rules_.needs_dns_resolution())
             dest_ip = dns_.resolve_local(host);
         if (rules_.evaluate(app_name, host, dest_ip, port, matched_rule))
             rule = &matched_rule;
@@ -411,11 +426,10 @@ void TrafficInterceptor::handle_connect(Socket& client, const std::string& host,
     }
 
     client.send_all("HTTP/1.1 200 Connection Established\r\n\r\n");
-    monitor_.update_connection(conn_id, 0, 0, "Relaying");
-    relay_data(client, remote, conn_id);
-
     log.http_status = 200;
     monitor_.log_traffic(log);
+    monitor_.update_connection(conn_id, 0, 0, "Relaying");
+    relay_data(client, remote, conn_id);
 }
 
 // ============================================================================
@@ -425,36 +439,11 @@ void TrafficInterceptor::handle_connect(Socket& client, const std::string& host,
 void TrafficInterceptor::handle_http_request(Socket& client, const std::string& host, uint16_t port,
                                               const std::string& request, const std::string& method,
                                               const std::string& app_name, uint64_t conn_id) {
-    // Bypass our own process
-    if (is_self_process(app_name)) {
-        Socket remote;
-        if (connect_direct(remote, host, port)) {
-            // Build relative-path request
-            std::string path = "/";
-            auto proto = request.find("://");
-            if (proto != std::string::npos) {
-                auto working = request.substr(proto + 3);
-                auto slash = working.find('/');
-                if (slash != std::string::npos) {
-                    auto space = working.find(' ', slash);
-                    path = working.substr(slash, space != std::string::npos ? space - slash : std::string::npos);
-                }
-            }
-            remote.send_all(make_relative_request(request, path));
-            monitor_.update_proxy_used(conn_id, "DIRECT (self-bypass)");
-            monitor_.update_connection(conn_id, 0, 0, "Relaying");
-            relay_data(client, remote, conn_id);
-        } else {
-            client.send_all("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-        }
-        return;
-    }
-
     ProxyRule matched_rule;
     const ProxyRule* rule = nullptr;
     if (rules_.rule_count() > 0) {
         std::string dest_ip;
-        if (rules_.has_ip_target_rules())
+        if (rules_.needs_dns_resolution())
             dest_ip = dns_.resolve_local(host);
         if (rules_.evaluate(app_name, host, dest_ip, port, matched_rule))
             rule = &matched_rule;
@@ -519,11 +508,10 @@ void TrafficInterceptor::handle_http_request(Socket& client, const std::string& 
         remote.send_all(make_relative_request(request, path));
     }
 
-    monitor_.update_connection(conn_id, 0, 0, "Relaying");
-    relay_data(client, remote, conn_id);
-
     log.http_status = 200;
     monitor_.log_traffic(log);
+    monitor_.update_connection(conn_id, 0, 0, "Relaying");
+    relay_data(client, remote, conn_id);
 }
 
 // ============================================================================
@@ -598,9 +586,11 @@ bool TrafficInterceptor::connect_via_rule(Socket& remote, const ProxyRule* rule,
 bool TrafficInterceptor::connect_through_proxy(Socket& remote, const Proxy& proxy,
                                                 const std::string& dest_host, uint16_t dest_port) {
     if (!remote.create()) return false;
-    remote.set_timeout(5000);
 
+    // Don't set SO_SNDTIMEO before connect() — on Windows it can interfere with the TCP handshake.
+    // System default connect timeout (~21s) applies. Set data timeout after connect succeeds.
     if (!remote.connect(proxy.host, proxy.port)) return false;
+    remote.set_timeout(30000);
 
     switch (proxy.type) {
     case ProxyType::HTTP:
@@ -628,8 +618,13 @@ bool TrafficInterceptor::connect_through_proxy(Socket& remote, const Proxy& prox
 
         req += "\r\n";
         if (!remote.send_all(req)) return false;
-        std::string resp = remote.recv_all(4096);
-        return resp.find("200") != std::string::npos;
+        // Read proxy response with a single recv — do NOT use recv_all which loops
+        // and blocks waiting for more data while the proxy waits for TLS Client Hello
+        char resp_buf[4096];
+        int resp_n = remote.recv_raw(resp_buf, sizeof(resp_buf) - 1);
+        if (resp_n <= 0) return false;
+        resp_buf[resp_n] = '\0';
+        return strstr(resp_buf, "200") != nullptr;
     }
 
     case ProxyType::SOCKS4:
@@ -645,13 +640,48 @@ bool TrafficInterceptor::connect_through_proxy(Socket& remote, const Proxy& prox
 
 bool TrafficInterceptor::connect_direct(Socket& remote, const std::string& host, uint16_t port) {
     if (!remote.create()) return false;
-    remote.set_timeout(10000);
-    return remote.connect(host, port);
+    // Don't set SO_SNDTIMEO before connect() — on Windows it shortens the TCP handshake timeout.
+    // Let the system default (~21s) handle the connect timeout.
+    if (!remote.connect(host, port)) return false;
+    remote.set_timeout(30000); // Data transfer timeout only
+    return true;
 }
 
 // ============================================================================
-// Data relay with monitoring
+// Data relay
 // ============================================================================
+
+// Simple relay without monitoring (used for self-process bypass)
+void TrafficInterceptor::relay_data_simple(Socket& client, Socket& remote) {
+    fd_set fds;
+    char buf[32768];
+
+    while (running_) {
+        FD_ZERO(&fds);
+        FD_SET(client.handle(), &fds);
+        FD_SET(remote.handle(), &fds);
+
+        struct timeval tv;
+        tv.tv_sec = 120;
+        tv.tv_usec = 0;
+
+        SOCKET max_fd = std::max(client.handle(), remote.handle()) + 1;
+        int ready = select((int)max_fd, &fds, nullptr, nullptr, &tv);
+        if (ready <= 0) break;
+
+        if (FD_ISSET(client.handle(), &fds)) {
+            int n = client.recv_raw(buf, sizeof(buf));
+            if (n <= 0) break;
+            if (!remote.send_raw(buf, n)) break;
+        }
+
+        if (FD_ISSET(remote.handle(), &fds)) {
+            int n = remote.recv_raw(buf, sizeof(buf));
+            if (n <= 0) break;
+            if (!client.send_raw(buf, n)) break;
+        }
+    }
+}
 
 void TrafficInterceptor::relay_data(Socket& client, Socket& remote, uint64_t conn_id) {
     fd_set fds;

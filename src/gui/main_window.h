@@ -71,6 +71,8 @@ private:
     void on_rule_add();
     void on_rule_edit();
     void on_rule_delete();
+    void on_rule_move_up();
+    void on_rule_move_down();
 
     // Chain commands
     void on_chain_add();
@@ -141,4 +143,8 @@ private:
     bool sort_ascending_ = true;
     NOTIFYICONDATAW nid_ = {};
     bool in_tray_ = false;
+
+    // Rule drag & drop reordering
+    bool dragging_rule_ = false;
+    int drag_rule_index_ = -1;
 };
