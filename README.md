@@ -37,7 +37,30 @@ It sits between your apps and the internet, intercepting HTTP/HTTPS traffic and 
 
 ## Screenshots
 
-*Coming soon*
+### Proxies Tab
+Manage your proxy servers — add, edit, check, and import/export.
+
+![Proxies Tab](screenshots/proxies-tab.png)
+
+### Rules Tab
+Create flexible routing rules with drag & drop reordering.
+
+![Rules Tab](screenshots/rules-tab.png)
+
+### Rule Editor
+Combine applications, hosts, and ports in a single rule with AND logic.
+
+![Rule Editor](screenshots/rule-dialog.png)
+
+### Connections Tab
+Real-time view of all system TCP connections with process info.
+
+![Connections Tab](screenshots/connections-tab.png)
+
+### Logs Tab
+Full traffic log with destination, proxy used, method, and status.
+
+![Logs Tab](screenshots/logs-tab.png)
 
 ## How It Works
 
